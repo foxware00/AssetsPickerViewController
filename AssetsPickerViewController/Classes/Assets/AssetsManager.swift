@@ -14,6 +14,7 @@ public protocol AssetsManagerDelegate: class {
     
     func assetsManager(manager: AssetsManager, authorizationStatusChanged oldStatus: PHAuthorizationStatus, newStatus: PHAuthorizationStatus)
     func assetsManager(manager: AssetsManager, reloadedAlbumsInSection section: Int)
+    func assetsManagerFetched(manager: AssetsManager)
     
     func assetsManager(manager: AssetsManager, insertedAlbums albums: [PHAssetCollection], at indexPaths: [IndexPath])
     func assetsManager(manager: AssetsManager, removedAlbums albums: [PHAssetCollection], at indexPaths: [IndexPath])
@@ -202,12 +203,13 @@ extension AssetsManager {
         return sortedAlbumsArray[indexPath.section][indexPath.row].localizedTitle
     }
     
-    open func imageOfAlbum(at indexPath: IndexPath, size: CGSize, isNeedDegraded: Bool = true, completion: @escaping ((UIImage?) -> Void)) {
-        if let fetchResult = fetchMap[sortedAlbumsArray[indexPath.section][indexPath.row].localIdentifier] {
-            if let asset = pickerConfig.assetsIsScrollToBottom == true ? fetchResult.lastObject : fetchResult.firstObject {
+    open func imageOfAlbum(at indexPath: IndexPath, size: CGSize, isNeedDegraded: Bool = true, completion: @escaping ((UIImage?) -> Void)) -> PHImageRequestID? {
+        let album = sortedAlbumsArray[indexPath.section][indexPath.row]
+        if let fetchResult = fetchMap[album.localIdentifier] {
+            if let asset = pickerConfig.assetsIsScrollToBottom ? fetchResult.lastObject : fetchResult.firstObject {
                 let options = PHImageRequestOptions()
                 options.isNetworkAccessAllowed = true
-                imageManager.requestImage(
+                return imageManager.requestImage(
                     for: asset,
                     targetSize: size,
                     contentMode: .aspectFill,
@@ -227,6 +229,7 @@ extension AssetsManager {
         } else {
             completion(nil)
         }
+        return nil
     }
     
     @discardableResult
@@ -324,22 +327,37 @@ extension AssetsManager {
         }
     }
     
-    open func selectAsync(album newAlbum: PHAssetCollection, complection: @escaping (Bool) -> Void) {
+    open func selectDefaultAlbum() {
+        self.selectedAlbum = nil
+        let allAlbums = sortedAlbumsArray.flatMap { $0 }.map { $0 }
+        if let defaultAlbum = self.defaultAlbum, allAlbums.contains(defaultAlbum) {
+            select(album: defaultAlbum)
+        } else if let cameraRollAlbum = self.cameraRollAlbum, allAlbums.contains(cameraRollAlbum) {
+            select(album: cameraRollAlbum)
+        } else if let firstAlbum = allAlbums.first {
+            select(album: firstAlbum)
+        } else {
+            logw("Cannot find fallback album!")
+        }
+    }
+    
+    open func selectAsync(album newAlbum: PHAssetCollection, completion: @escaping (Bool, [PHAsset]) -> Void) {
         if let oldAlbumIdentifier = self.selectedAlbum?.localIdentifier, oldAlbumIdentifier == newAlbum.localIdentifier {
             logi("Selected same album.")
-            complection(false)
+            completion(false, [])
         }
         self.selectedAlbum = newAlbum
         if let fetchResult = fetchMap[newAlbum.localIdentifier] {
             resourceLoadingQueue.async { [weak self] in
                 let indexSet = IndexSet(0..<fetchResult.count)
-                self?.assetArray = fetchResult.objects(at: indexSet)
+                let photos = fetchResult.objects(at: indexSet)
+                self?.assetArray = photos
                 DispatchQueue.main.async {
-                    complection(true)
+                    completion(true, photos)
                 }
             }
         } else {
-            complection(false)
+            completion(false, [])
         }
     }
 }
@@ -482,6 +500,12 @@ extension AssetsManager {
                     self.sortedAlbumsArray.append(momentEntry.sortedAlbums)
                     self.albumsFetchArray.append(momentEntry.fetchResult)
                 }
+                self.subscribers.forEach { [weak self] (delegate) in
+                    guard let `self` = self else { return }
+                    DispatchQueue.main.async {
+                        delegate.assetsManagerFetched(manager: self)
+                    }
+                }
                 self.isFetchedAlbums = true
             }
             // notify
@@ -501,12 +525,8 @@ extension AssetsManager {
             }
             
             // set default album
-            self.selectAsync(album: self.defaultAlbum ?? self.cameraRollAlbum) { [weak self] (result) in
-                guard let `self` = self else {
-                    completion?([])
-                    return
-                }
-                completion?(self.assetArray)
+            self.selectAsync(album: self.defaultAlbum ?? self.cameraRollAlbum) { result, photos in
+                completion?(photos)
             }
         })
         
